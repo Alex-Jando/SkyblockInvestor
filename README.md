@@ -1,0 +1,116 @@
+# Hypixel SkyBlock Bazaar Investment Basket (MVP)
+
+MVP stack:
+- Frontend: Next.js (TypeScript) in `web/`
+- Database: Supabase Postgres with SQL migrations in `supabase/migrations/`
+- Worker: Python 3.11+ in `worker/`
+- Scheduler: GitHub Actions cron in `.github/workflows/cron.yml`
+
+## Repository Structure
+
+```
+/web
+  package.json
+  next.config.js
+  src/app/...
+/worker
+  requirements.txt
+  main.py
+  hypixel_api.py
+  db.py
+  features.py
+  model.py
+  allocator.py
+  portfolio.py
+  risk_blacklist.json
+/supabase/migrations
+  001_init.sql
+/.github/workflows
+  cron.yml
+README.md
+.env.example
+```
+
+## 1) Create Supabase Project
+
+1. Create a Supabase project.
+2. Copy the Postgres connection string (URI).
+3. Save it as:
+   - `SUPABASE_DATABASE_URL` for the worker.
+   - `DATABASE_URL` for the Next.js server (can be the same value).
+
+## 2) Apply SQL Migration
+
+Run from repo root:
+
+```bash
+psql "$SUPABASE_DATABASE_URL" -f supabase/migrations/001_init.sql
+```
+
+## 3) Configure Environment Variables
+
+Copy `.env.example` to `.env` and set values:
+
+- `HYPIXEL_API_KEY`
+- `SUPABASE_DATABASE_URL`
+- `DATABASE_URL`
+- `PAPER_START_COINS` (default `100000000`)
+- `SPREAD_MAX` (default `0.05`)
+- `LIQUIDITY_MIN` (default `2.0`)
+- `VOL_MAX` (default `0.25`)
+- `VOLUME_DROP_FRAC` (default `0.2`)
+- `FEASIBILITY_FACTOR` (default `0.05`)
+- `MIN_EXPECTED_RETURN_BUY` (default `0.01`)
+- `CONF_MIN_BUY` (default `0.55`)
+- `MIN_WEIGHT_PCT` (default `0.05`)
+- `MAX_WEIGHT_PCT` (default `0.30`)
+- `SELL_NEG_THRESHOLD` (default `-0.01`)
+- `SELL_NEG_THRESHOLD_14D` (default `-0.01`)
+
+## 4) Run Worker Manually (seed data)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install -r worker/requirements.txt
+python worker/main.py
+```
+
+The worker is idempotent by day:
+- snapshots upsert on `(item_id, day)`
+- latest day basket replaces basket items
+- latest day equity/holdings are overwritten
+
+## 5) Run Web Locally
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000`.
+
+## 6) Deploy Web to Vercel
+
+1. Import the repo in Vercel.
+2. Set root directory to `web`.
+3. Set environment variable:
+   - `DATABASE_URL` (Supabase Postgres connection string).
+
+## 7) Configure GitHub Actions Daily Cron
+
+Add repository secrets:
+- `HYPIXEL_API_KEY`
+- `SUPABASE_DATABASE_URL`
+
+Workflow: `.github/workflows/cron.yml`  
+Schedule: daily at `08:00 UTC` (plus manual `workflow_dispatch`).
+
+## API Endpoints (Web)
+
+- `GET /api/basket/latest`
+- `GET /api/sell/latest`
+- `GET /api/performance`
+
+The web app only reads precomputed DB rows; no heavy modeling runs in the web server.
