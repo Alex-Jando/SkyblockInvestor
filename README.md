@@ -34,10 +34,15 @@ README.md
 ## 1) Create Supabase Project
 
 1. Create a Supabase project.
-2. Copy the Postgres connection string (URI).
+2. Copy the Postgres connection string (URI), preferably the Supabase transaction pooler URI.
 3. Save it as:
    - `SUPABASE_DATABASE_URL` for the worker.
    - `DATABASE_URL` for the Next.js server (can be the same value).
+4. Recommended format:
+
+```text
+postgresql://postgres.<project_ref>:<db_password>@aws-1-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require
+```
 
 ## 2) Apply SQL Migration
 
@@ -96,13 +101,13 @@ Open `http://localhost:3000`.
 1. Import the repo in Vercel.
 2. Set root directory to `web`.
 3. Set environment variable:
-   - `DATABASE_URL` (Supabase Postgres connection string).
+   - `DATABASE_URL` (same pooler URI you use locally).
 
 ## 7) Configure GitHub Actions Daily Cron
 
 Add repository secrets:
 - `HYPIXEL_API_KEY`
-- `SUPABASE_DATABASE_URL`
+- `SUPABASE_DATABASE_URL` (pooler URI)
 
 Workflow: `.github/workflows/cron.yml`  
 Schedule: daily at `08:00 UTC` (plus manual `workflow_dispatch`).
