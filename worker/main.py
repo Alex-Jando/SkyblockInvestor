@@ -109,7 +109,9 @@ def _load_blacklist(path: Path) -> set[str]:
     return {str(item) for item in payload}
 
 
-def _select_signal_items(decision_frame: pd.DataFrame, buy_items: list[dict], sell_items: list[dict]) -> set[str]:
+def _select_signal_items(
+    decision_frame: pd.DataFrame, buy_items: list[dict], sell_items: list[dict]
+) -> set[str]:
     if decision_frame.empty:
         return set()
 
@@ -170,7 +172,9 @@ def main() -> None:
                 effective_sell_neg_threshold = max(settings.sell_neg_threshold, -0.005)
             elif history_days < 30:
                 mode = "BOOTSTRAP_30"
-                effective_min_expected_return_buy = min(settings.min_expected_return_buy, 0.007)
+                effective_min_expected_return_buy = min(
+                    settings.min_expected_return_buy, 0.007
+                )
                 effective_conf_min_buy = min(settings.conf_min_buy, 0.50)
                 effective_liquidity_min = min(settings.liquidity_min, 1.8)
                 effective_vol_max = max(settings.vol_max, 0.30)
@@ -233,7 +237,9 @@ def main() -> None:
                 current = features[features["day"] == latest_day].copy()
                 run_day = latest_day
 
-            model_bundle = train_models(features=features, as_of_day=run_day, min_history_days=60)
+            model_bundle = train_models(
+                features=features, as_of_day=run_day, min_history_days=60
+            )
             signals = predict_horizon_signals(
                 current_features=current,
                 model_bundle=model_bundle,
@@ -243,17 +249,29 @@ def main() -> None:
             )
 
             decision = prepare_decision_frame(current_features=current, signals=signals)
-            buy_items, sell_items, notes, exclusion_counts, funnel_counts, diagnosis, top_candidates = build_basket(
+            (
+                buy_items,
+                sell_items,
+                notes,
+                exclusion_counts,
+                funnel_counts,
+                diagnosis,
+                top_candidates,
+            ) = build_basket(
                 decision_frame=decision,
                 blacklist=blacklist,
                 cfg=basket_cfg,
             )
             if top_candidates:
-                logging.info("Top candidates before final allocation | %s", top_candidates)
+                logging.info(
+                    "Top candidates before final allocation | %s", top_candidates
+                )
 
             signal_items = _select_signal_items(decision, buy_items, sell_items)
             if signal_items:
-                signal_rows = signals[signals["item_id"].isin(signal_items)].to_dict("records")
+                signal_rows = signals[signals["item_id"].isin(signal_items)].to_dict(
+                    "records"
+                )
             else:
                 signal_rows = signals.to_dict("records")
             replace_item_signals(conn, day=run_day, ts=run_ts, rows=signal_rows)
@@ -298,9 +316,13 @@ def main() -> None:
             conn.rollback()
             raise
 
-    top_picks = ", ".join(
-        f"{row['item_id']} ({row['weight_pct'] * 100:.1f}%)" for row in buy_items[:5]
-    ) or "No BUY picks"
+    top_picks = (
+        ", ".join(
+            f"{row['item_id']} ({row['weight_pct'] * 100:.1f}%)"
+            for row in buy_items[:5]
+        )
+        or "No BUY picks"
+    )
     logging.info("Worker completed.")
     logging.info(
         "Summary | stored_items=%s | skipped_items=%s | signal_items=%s | buy=%s | sell=%s | model=%s | "

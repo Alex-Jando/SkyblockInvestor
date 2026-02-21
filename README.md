@@ -65,10 +65,14 @@ Copy `.env.example` to `.env` and set values:
 - `VOL_MAX` (default `0.25`)
 - `VOLUME_DROP_FRAC` (default `0.2`)
 - `FEASIBILITY_FACTOR` (default `0.05`)
+- `TURNOVER_MIN_FRAC` (default `0.05`)
+- `TURNOVER_CAP_FACTOR` (default `0.25`)
+- `LIQUIDITY_TARGET` (default `2.5`)
 - `MIN_EXPECTED_RETURN_BUY` (default `0.01`)
 - `CONF_MIN_BUY` (default `0.55`)
 - `MIN_WEIGHT_PCT` (default `0.05`)
 - `MAX_WEIGHT_PCT` (default `0.30`)
+- `MIN_BASKET_SIZE` (default `6`)
 - `SELL_NEG_THRESHOLD` (default `-0.01`)
 - `SELL_NEG_THRESHOLD_14D` (default `-0.01`)
 
@@ -85,6 +89,16 @@ The worker is idempotent by day:
 - snapshots upsert on `(item_id, day)`
 - latest day basket replaces basket items
 - latest day equity/holdings are overwritten
+
+Bootstrap behavior:
+- If history is under 15 days, thresholds are auto-relaxed.
+- If history is under 30 days, moderate relaxations remain active.
+
+Quick smoke test:
+
+```bash
+python -m worker.smoke_test
+```
 
 ## 5) Run Web Locally
 

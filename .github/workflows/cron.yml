@@ -2,12 +2,13 @@ name: Daily Bazaar Worker
 
 on:
   schedule:
-    - cron: "0 8 * * *"
+    - cron: "0 8 * * *" # 08:00 UTC daily
   workflow_dispatch:
 
 jobs:
   run-worker:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,10 +19,36 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r worker/requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r worker/requirements.txt
+
+      # This step confirms the secret is actually available to the job
+      - name: Debug env presence (safe)
+        run: |
+          if [ -z "${{ secrets.HYPIXEL_API_KEY }}" ]; then
+            echo "ERROR: HYPIXEL_API_KEY secret is NOT available to this workflow"
+            exit 1
+          else
+            echo "HYPIXEL_API_KEY secret is available"
+          fi
 
       - name: Run worker
         env:
           HYPIXEL_API_KEY: ${{ secrets.HYPIXEL_API_KEY }}
           SUPABASE_DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
-        run: python worker/main.py
+          PAPER_START_COINS: "100000000"
+          SPREAD_MAX: "0.05"
+          LIQUIDITY_MIN: "2.0"
+          VOL_MAX: "0.25"
+          VOLUME_DROP_FRAC: "0.2"
+          FEASIBILITY_FACTOR: "0.05"
+          MIN_EXPECTED_RETURN_BUY: "0.01"
+          CONF_MIN_BUY: "0.55"
+          MIN_WEIGHT_PCT: "0.05"
+          MAX_WEIGHT_PCT: "0.30"
+          SELL_NEG_THRESHOLD: "-0.01"
+          SELL_NEG_THRESHOLD_14D: "-0.01"
+        run: |
+          python worker/main.py
+
