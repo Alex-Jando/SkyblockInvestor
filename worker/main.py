@@ -43,12 +43,16 @@ class Settings:
     vol_max: float
     volume_drop_frac: float
     feasibility_factor: float
+    turnover_min_frac: float
+    turnover_cap_factor: float
+    liquidity_target: float
     min_expected_return_buy: float
     conf_min_buy: float
     min_weight_pct: float
     max_weight_pct: float
     sell_neg_threshold: float
     sell_neg_threshold_14d: float
+    min_basket_size: int
 
     @staticmethod
     def _env_float(name: str, default: float) -> float:
@@ -56,6 +60,13 @@ class Settings:
         if raw is None or raw == "":
             return default
         return float(raw)
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None or raw == "":
+            return default
+        return int(raw)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -75,12 +86,16 @@ class Settings:
             vol_max=cls._env_float("VOL_MAX", 0.25),
             volume_drop_frac=cls._env_float("VOLUME_DROP_FRAC", 0.2),
             feasibility_factor=cls._env_float("FEASIBILITY_FACTOR", 0.05),
+            turnover_min_frac=cls._env_float("TURNOVER_MIN_FRAC", 0.05),
+            turnover_cap_factor=cls._env_float("TURNOVER_CAP_FACTOR", 0.25),
+            liquidity_target=cls._env_float("LIQUIDITY_TARGET", 2.5),
             min_expected_return_buy=cls._env_float("MIN_EXPECTED_RETURN_BUY", 0.01),
             conf_min_buy=cls._env_float("CONF_MIN_BUY", 0.55),
             min_weight_pct=cls._env_float("MIN_WEIGHT_PCT", 0.05),
             max_weight_pct=cls._env_float("MAX_WEIGHT_PCT", 0.30),
             sell_neg_threshold=cls._env_float("SELL_NEG_THRESHOLD", -0.01),
             sell_neg_threshold_14d=cls._env_float("SELL_NEG_THRESHOLD_14D", -0.01),
+            min_basket_size=cls._env_int("MIN_BASKET_SIZE", 6),
         )
 
 
@@ -129,18 +144,10 @@ def main() -> None:
     blacklist_path = Path(__file__).resolve().parent / "risk_blacklist.json"
     blacklist = _load_blacklist(blacklist_path)
 
-    basket_cfg = BasketConfig(
-        spread_max=settings.spread_max,
-        liquidity_min=settings.liquidity_min,
-        vol_max=settings.vol_max,
-        volume_drop_frac=settings.volume_drop_frac,
-        min_expected_return_buy=settings.min_expected_return_buy,
-        conf_min_buy=settings.conf_min_buy,
-        min_weight_pct=settings.min_weight_pct,
-        max_weight_pct=settings.max_weight_pct,
-        sell_neg_threshold=settings.sell_neg_threshold,
-        sell_neg_threshold_14d=settings.sell_neg_threshold_14d,
-    )
+    basket_cfg: BasketConfig | None = None
+    history_days = 0
+    funnel_counts: dict[str, int] = {}
+    diagnosis = ""
 
     with get_connection(settings.supabase_database_url) as conn:
         try:
@@ -150,11 +157,74 @@ def main() -> None:
             if history.empty:
                 raise RuntimeError("History is empty after snapshot upsert.")
 
+            history_days = pd.Series(history["day"]).nunique()
+            if history_days < 15:
+                mode = "BOOTSTRAP_15"
+                effective_min_expected_return_buy = 0.003
+                effective_conf_min_buy = 0.45
+                effective_liquidity_min = min(settings.liquidity_min, 1.5)
+                effective_vol_max = max(settings.vol_max, 0.35)
+                effective_volume_drop_frac = min(settings.volume_drop_frac, 0.10)
+                effective_turnover_min_frac = min(settings.turnover_min_frac, 0.02)
+                effective_turnover_cap_factor = max(settings.turnover_cap_factor, 0.35)
+                effective_sell_neg_threshold = max(settings.sell_neg_threshold, -0.005)
+            elif history_days < 30:
+                mode = "BOOTSTRAP_30"
+                effective_min_expected_return_buy = min(settings.min_expected_return_buy, 0.007)
+                effective_conf_min_buy = min(settings.conf_min_buy, 0.50)
+                effective_liquidity_min = min(settings.liquidity_min, 1.8)
+                effective_vol_max = max(settings.vol_max, 0.30)
+                effective_volume_drop_frac = min(settings.volume_drop_frac, 0.15)
+                effective_turnover_min_frac = min(settings.turnover_min_frac, 0.02)
+                effective_turnover_cap_factor = max(settings.turnover_cap_factor, 0.35)
+                effective_sell_neg_threshold = max(settings.sell_neg_threshold, -0.005)
+            else:
+                mode = "NORMAL"
+                effective_min_expected_return_buy = settings.min_expected_return_buy
+                effective_conf_min_buy = settings.conf_min_buy
+                effective_liquidity_min = settings.liquidity_min
+                effective_vol_max = settings.vol_max
+                effective_volume_drop_frac = settings.volume_drop_frac
+                effective_turnover_min_frac = settings.turnover_min_frac
+                effective_turnover_cap_factor = settings.turnover_cap_factor
+                effective_sell_neg_threshold = settings.sell_neg_threshold
+
+            basket_cfg = BasketConfig(
+                mode=mode,
+                spread_max=settings.spread_max,
+                liquidity_min=effective_liquidity_min,
+                vol_max=effective_vol_max,
+                volume_drop_frac=effective_volume_drop_frac,
+                min_expected_return_buy=effective_min_expected_return_buy,
+                conf_min_buy=effective_conf_min_buy,
+                min_weight_pct=settings.min_weight_pct,
+                max_weight_pct=settings.max_weight_pct,
+                sell_neg_threshold=effective_sell_neg_threshold,
+                sell_neg_threshold_14d=settings.sell_neg_threshold_14d,
+                min_basket_size=settings.min_basket_size,
+            )
+            logging.info(
+                "Mode | history_days=%s mode=%s min_expected=%.4f conf_min=%.2f liquidity_min=%.2f vol_max=%.3f "
+                "volume_drop_frac=%.2f turnover_min_frac=%.3f turnover_cap_factor=%.2f sell_neg_threshold=%.4f",
+                history_days,
+                mode,
+                effective_min_expected_return_buy,
+                effective_conf_min_buy,
+                effective_liquidity_min,
+                effective_vol_max,
+                effective_volume_drop_frac,
+                effective_turnover_min_frac,
+                effective_turnover_cap_factor,
+                effective_sell_neg_threshold,
+            )
+
             features = build_features(
                 history,
                 spread_max=settings.spread_max,
                 paper_equity_coins=settings.paper_start_coins,
-                feasibility_factor=settings.feasibility_factor,
+                turnover_min_frac=effective_turnover_min_frac,
+                turnover_cap_factor=effective_turnover_cap_factor,
+                max_weight_pct=settings.max_weight_pct,
             )
 
             current = features[features["day"] == run_day].copy()
@@ -168,15 +238,18 @@ def main() -> None:
                 current_features=current,
                 model_bundle=model_bundle,
                 spread_max=settings.spread_max,
-                liquidity_min=settings.liquidity_min,
+                liquidity_min=effective_liquidity_min,
+                liquidity_target=settings.liquidity_target,
             )
 
             decision = prepare_decision_frame(current_features=current, signals=signals)
-            buy_items, sell_items, notes, exclusion_counts = build_basket(
+            buy_items, sell_items, notes, exclusion_counts, funnel_counts, diagnosis, top_candidates = build_basket(
                 decision_frame=decision,
                 blacklist=blacklist,
                 cfg=basket_cfg,
             )
+            if top_candidates:
+                logging.info("Top candidates before final allocation | %s", top_candidates)
 
             signal_items = _select_signal_items(decision, buy_items, sell_items)
             if signal_items:
@@ -230,13 +303,17 @@ def main() -> None:
     ) or "No BUY picks"
     logging.info("Worker completed.")
     logging.info(
-        "Summary | stored_items=%s | skipped_items=%s | signal_items=%s | buy=%s | sell=%s | model=%s",
+        "Summary | stored_items=%s | skipped_items=%s | signal_items=%s | buy=%s | sell=%s | model=%s | "
+        "history_days=%s | mode=%s | funnel=%s",
         len(snapshot_rows),
         skipped_items,
         len(signal_rows),
         len(buy_items),
         len(sell_items),
         model_bundle.model_version,
+        history_days,
+        basket_cfg.mode if basket_cfg else "UNKNOWN",
+        funnel_counts,
     )
     logging.info("Top picks | %s", top_picks)
     logging.info(
@@ -248,6 +325,8 @@ def main() -> None:
     )
     if exclusion_counts:
         logging.info("Risk exclusions | %s", exclusion_counts)
+    if not buy_items:
+        logging.warning("No BUY diagnosis | %s", diagnosis)
 
 
 if __name__ == "__main__":
