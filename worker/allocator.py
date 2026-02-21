@@ -26,6 +26,15 @@ class BasketConfig:
 def prepare_decision_frame(current_features: pd.DataFrame, signals: pd.DataFrame) -> pd.DataFrame:
     frame = current_features.copy().set_index("item_id")
 
+    if signals.empty:
+        for horizon in [1, 3, 7, 14, 30]:
+            frame[f"expected_return_{horizon}d"] = np.nan
+            frame[f"confidence_{horizon}d"] = np.nan
+        return frame.reset_index()
+
+    signals = signals.copy()
+    signals["horizon_days"] = pd.to_numeric(signals["horizon_days"], errors="coerce").astype("Int64")
+
     expected = signals.pivot_table(
         index="item_id",
         columns="horizon_days",
@@ -143,6 +152,25 @@ def build_basket(
         return [], [], "No decision frame available.", {}
 
     df = decision_frame.copy()
+    required_columns = [
+        "item_id",
+        "spread_pct",
+        "liquidity_score",
+        "volatility_30d",
+        "max_alloc_pct_feasible",
+        "expected_return_7d",
+        "confidence_7d",
+        "expected_return_14d",
+        "expected_return_30d",
+        "return_7d",
+        "imbalance",
+        "volume_median_30d",
+        "volume_daily",
+    ]
+    for col in required_columns:
+        if col not in df.columns:
+            df[col] = np.nan
+
     df = df.replace([np.inf, -np.inf], np.nan)
     df = df.dropna(
         subset=[
@@ -167,6 +195,22 @@ def build_basket(
             pass_mask.append(True)
     df["passes_risk"] = pass_mask
     filtered = df[df["passes_risk"]].copy()
+    post_filter_required = [
+        "item_id",
+        "expected_return_7d",
+        "confidence_7d",
+        "expected_return_14d",
+        "expected_return_30d",
+        "return_7d",
+        "liquidity_score",
+        "spread_pct",
+        "max_alloc_pct_feasible",
+        "volatility_30d",
+        "imbalance",
+    ]
+    for col in post_filter_required:
+        if col not in filtered.columns:
+            filtered[col] = np.nan
 
     buy = filtered[
         (filtered["expected_return_7d"] >= cfg.min_expected_return_buy)

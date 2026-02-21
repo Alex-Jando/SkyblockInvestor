@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+from dotenv import load_dotenv
 
 from allocator import BasketConfig, build_basket, prepare_decision_frame
 from db import (
@@ -28,6 +29,8 @@ from features import build_features
 from hypixel_api import fetch_bazaar, parse_snapshot_rows
 from model import train_models, predict_horizon_signals
 from portfolio import simulate_daily_rebalance
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 @dataclass

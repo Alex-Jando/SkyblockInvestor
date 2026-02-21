@@ -13,7 +13,7 @@ def get_connection(database_url: str | None = None) -> psycopg.Connection:
     dsn = database_url or os.environ.get("SUPABASE_DATABASE_URL")
     if not dsn:
         raise ValueError("SUPABASE_DATABASE_URL is required.")
-    return psycopg.connect(dsn, row_factory=dict_row)
+    return psycopg.connect(dsn, row_factory=dict_row, prepare_threshold=None)
 
 
 def upsert_bazaar_snapshots(conn: psycopg.Connection, rows: list[dict[str, Any]]) -> None:
