@@ -6,7 +6,6 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -16,11 +15,13 @@ from db import (
     fetch_portfolio_state,
     fetch_previous_equity,
     fetch_previous_holdings,
+    get_app_state_value,
     get_connection,
     load_current_prices,
     load_snapshots_history,
     replace_holdings,
     replace_item_signals,
+    upsert_app_state_value,
     upsert_basket_and_items,
     upsert_bazaar_snapshots,
     upsert_equity,
@@ -31,6 +32,7 @@ from model import train_models, predict_horizon_signals
 from portfolio import simulate_daily_rebalance
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+STATE_KEY = "portfolio_state_v1"
 
 
 @dataclass
@@ -42,7 +44,6 @@ class Settings:
     liquidity_min: float
     vol_max: float
     volume_drop_frac: float
-    feasibility_factor: float
     turnover_min_frac: float
     turnover_cap_factor: float
     liquidity_target: float
@@ -85,17 +86,16 @@ class Settings:
             liquidity_min=cls._env_float("LIQUIDITY_MIN", 2.0),
             vol_max=cls._env_float("VOL_MAX", 0.25),
             volume_drop_frac=cls._env_float("VOLUME_DROP_FRAC", 0.2),
-            feasibility_factor=cls._env_float("FEASIBILITY_FACTOR", 0.05),
             turnover_min_frac=cls._env_float("TURNOVER_MIN_FRAC", 0.05),
             turnover_cap_factor=cls._env_float("TURNOVER_CAP_FACTOR", 0.25),
             liquidity_target=cls._env_float("LIQUIDITY_TARGET", 2.5),
-            min_expected_return_buy=cls._env_float("MIN_EXPECTED_RETURN_BUY", 0.01),
-            conf_min_buy=cls._env_float("CONF_MIN_BUY", 0.55),
+            min_expected_return_buy=cls._env_float("MIN_EXPECTED_RETURN_BUY", 0.015),
+            conf_min_buy=cls._env_float("CONF_MIN_BUY", 0.60),
             min_weight_pct=cls._env_float("MIN_WEIGHT_PCT", 0.05),
             max_weight_pct=cls._env_float("MAX_WEIGHT_PCT", 0.30),
             sell_neg_threshold=cls._env_float("SELL_NEG_THRESHOLD", -0.01),
             sell_neg_threshold_14d=cls._env_float("SELL_NEG_THRESHOLD_14D", -0.01),
-            min_basket_size=cls._env_int("MIN_BASKET_SIZE", 6),
+            min_basket_size=cls._env_int("MIN_BASKET_SIZE", 3),
         )
 
 
@@ -109,12 +109,9 @@ def _load_blacklist(path: Path) -> set[str]:
     return {str(item) for item in payload}
 
 
-def _select_signal_items(
-    decision_frame: pd.DataFrame, buy_items: list[dict], sell_items: list[dict]
-) -> set[str]:
+def _select_signal_items(decision_frame: pd.DataFrame, buy_items: list[dict], sell_items: list[dict]) -> set[str]:
     if decision_frame.empty:
         return set()
-
     top_liq = (
         decision_frame.sort_values("liquidity_score", ascending=False)
         .head(500)["item_id"]
@@ -127,13 +124,36 @@ def _select_signal_items(
     return selected
 
 
-def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
+def _classify_market_regime(current: pd.DataFrame, spread_max: float) -> tuple[str, dict[str, float]]:
+    if current.empty:
+        return "MIXED", {"breadth": 0.0, "median_spread": 0.0, "median_volatility": 0.0}
 
+    sample = current[current["spread_pct"] <= max(spread_max * 1.5, 0.08)].copy()
+    if sample.empty:
+        sample = current.copy()
+
+    breadth = float((sample["return_7d"] > 0).mean())
+    median_spread = float(sample["spread_pct"].median())
+    median_vol = float(sample["volatility_30d"].median())
+
+    if breadth >= 0.55 and median_spread <= 0.05 and median_vol <= 0.12:
+        regime = "RISK_ON"
+    elif breadth < 0.35 or median_spread > 0.09 or median_vol > 0.18:
+        regime = "RISK_OFF"
+    else:
+        regime = "MIXED"
+
+    return regime, {
+        "breadth": breadth,
+        "median_spread": median_spread,
+        "median_volatility": median_vol,
+    }
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     settings = Settings.from_env()
+
     run_ts = datetime.now(timezone.utc).replace(microsecond=0)
     run_day = run_ts.date()
 
@@ -143,84 +163,44 @@ def main() -> None:
     if not snapshot_rows:
         raise RuntimeError("No valid bazaar rows found in payload.")
 
-    blacklist_path = Path(__file__).resolve().parent / "risk_blacklist.json"
-    blacklist = _load_blacklist(blacklist_path)
-
-    basket_cfg: BasketConfig | None = None
+    blacklist = _load_blacklist(Path(__file__).resolve().parent / "risk_blacklist.json")
     history_days = 0
     funnel_counts: dict[str, int] = {}
     diagnosis = ""
+    market_regime = "MIXED"
+    regime_stats: dict[str, float] = {}
+    portfolio_diag: dict[str, float | int | str] = {}
 
     with get_connection(settings.supabase_database_url) as conn:
         try:
             upsert_bazaar_snapshots(conn, snapshot_rows)
-
             history = load_snapshots_history(conn)
             if history.empty:
                 raise RuntimeError("History is empty after snapshot upsert.")
 
             history_days = pd.Series(history["day"]).nunique()
+            # Bootstrap relaxations remain, but stricter than previous fallback strategy.
             if history_days < 15:
                 mode = "BOOTSTRAP_15"
-                effective_min_expected_return_buy = 0.003
-                effective_conf_min_buy = 0.45
-                effective_liquidity_min = min(settings.liquidity_min, 1.5)
-                effective_vol_max = max(settings.vol_max, 0.35)
-                effective_volume_drop_frac = min(settings.volume_drop_frac, 0.10)
-                effective_turnover_min_frac = min(settings.turnover_min_frac, 0.02)
-                effective_turnover_cap_factor = max(settings.turnover_cap_factor, 0.35)
+                effective_liquidity_min = min(settings.liquidity_min, 1.6)
+                effective_vol_max = max(settings.vol_max, 0.30)
+                effective_turnover_min_frac = min(settings.turnover_min_frac, 0.03)
+                effective_turnover_cap_factor = max(settings.turnover_cap_factor, 0.30)
                 effective_sell_neg_threshold = max(settings.sell_neg_threshold, -0.005)
             elif history_days < 30:
                 mode = "BOOTSTRAP_30"
-                effective_min_expected_return_buy = min(
-                    settings.min_expected_return_buy, 0.007
-                )
-                effective_conf_min_buy = min(settings.conf_min_buy, 0.50)
                 effective_liquidity_min = min(settings.liquidity_min, 1.8)
-                effective_vol_max = max(settings.vol_max, 0.30)
-                effective_volume_drop_frac = min(settings.volume_drop_frac, 0.15)
-                effective_turnover_min_frac = min(settings.turnover_min_frac, 0.02)
-                effective_turnover_cap_factor = max(settings.turnover_cap_factor, 0.35)
-                effective_sell_neg_threshold = max(settings.sell_neg_threshold, -0.005)
+                effective_vol_max = max(settings.vol_max, 0.28)
+                effective_turnover_min_frac = min(settings.turnover_min_frac, 0.04)
+                effective_turnover_cap_factor = max(settings.turnover_cap_factor, 0.28)
+                effective_sell_neg_threshold = settings.sell_neg_threshold
             else:
                 mode = "NORMAL"
-                effective_min_expected_return_buy = settings.min_expected_return_buy
-                effective_conf_min_buy = settings.conf_min_buy
                 effective_liquidity_min = settings.liquidity_min
                 effective_vol_max = settings.vol_max
-                effective_volume_drop_frac = settings.volume_drop_frac
                 effective_turnover_min_frac = settings.turnover_min_frac
                 effective_turnover_cap_factor = settings.turnover_cap_factor
                 effective_sell_neg_threshold = settings.sell_neg_threshold
-
-            basket_cfg = BasketConfig(
-                mode=mode,
-                spread_max=settings.spread_max,
-                liquidity_min=effective_liquidity_min,
-                vol_max=effective_vol_max,
-                volume_drop_frac=effective_volume_drop_frac,
-                min_expected_return_buy=effective_min_expected_return_buy,
-                conf_min_buy=effective_conf_min_buy,
-                min_weight_pct=settings.min_weight_pct,
-                max_weight_pct=settings.max_weight_pct,
-                sell_neg_threshold=effective_sell_neg_threshold,
-                sell_neg_threshold_14d=settings.sell_neg_threshold_14d,
-                min_basket_size=settings.min_basket_size,
-            )
-            logging.info(
-                "Mode | history_days=%s mode=%s min_expected=%.4f conf_min=%.2f liquidity_min=%.2f vol_max=%.3f "
-                "volume_drop_frac=%.2f turnover_min_frac=%.3f turnover_cap_factor=%.2f sell_neg_threshold=%.4f",
-                history_days,
-                mode,
-                effective_min_expected_return_buy,
-                effective_conf_min_buy,
-                effective_liquidity_min,
-                effective_vol_max,
-                effective_volume_drop_frac,
-                effective_turnover_min_frac,
-                effective_turnover_cap_factor,
-                effective_sell_neg_threshold,
-            )
 
             features = build_features(
                 history,
@@ -233,13 +213,21 @@ def main() -> None:
 
             current = features[features["day"] == run_day].copy()
             if current.empty:
-                latest_day = features["day"].max()
-                current = features[features["day"] == latest_day].copy()
-                run_day = latest_day
+                run_day = features["day"].max()
+                current = features[features["day"] == run_day].copy()
 
-            model_bundle = train_models(
-                features=features, as_of_day=run_day, min_history_days=60
+            market_regime, regime_stats = _classify_market_regime(current, settings.spread_max)
+            logging.info(
+                "Regime | mode=%s market=%s history_days=%s breadth=%.3f median_spread=%.4f median_vol=%.4f",
+                mode,
+                market_regime,
+                history_days,
+                regime_stats["breadth"],
+                regime_stats["median_spread"],
+                regime_stats["median_volatility"],
             )
+
+            model_bundle = train_models(features=features, as_of_day=run_day, min_history_days=60)
             signals = predict_horizon_signals(
                 current_features=current,
                 model_bundle=model_bundle,
@@ -249,6 +237,18 @@ def main() -> None:
             )
 
             decision = prepare_decision_frame(current_features=current, signals=signals)
+            basket_cfg = BasketConfig(
+                mode=mode,
+                market_regime=market_regime,
+                spread_max=settings.spread_max,
+                liquidity_min=effective_liquidity_min,
+                vol_max=effective_vol_max,
+                min_weight_pct=settings.min_weight_pct,
+                max_weight_pct=settings.max_weight_pct,
+                sell_neg_threshold=effective_sell_neg_threshold,
+                sell_neg_threshold_14d=settings.sell_neg_threshold_14d,
+                max_holdings=5,
+            )
             (
                 buy_items,
                 sell_items,
@@ -257,23 +257,14 @@ def main() -> None:
                 funnel_counts,
                 diagnosis,
                 top_candidates,
-            ) = build_basket(
-                decision_frame=decision,
-                blacklist=blacklist,
-                cfg=basket_cfg,
-            )
+                safe_universe,
+            ) = build_basket(decision_frame=decision, blacklist=blacklist, cfg=basket_cfg)
+
             if top_candidates:
-                logging.info(
-                    "Top candidates before final allocation | %s", top_candidates
-                )
+                logging.info("Top candidates | %s", top_candidates)
 
             signal_items = _select_signal_items(decision, buy_items, sell_items)
-            if signal_items:
-                signal_rows = signals[signals["item_id"].isin(signal_items)].to_dict(
-                    "records"
-                )
-            else:
-                signal_rows = signals.to_dict("records")
+            signal_rows = signals[signals["item_id"].isin(signal_items)].to_dict("records") if signal_items else signals.to_dict("records")
             replace_item_signals(conn, day=run_day, ts=run_ts, rows=signal_rows)
 
             upsert_basket_and_items(
@@ -296,37 +287,39 @@ def main() -> None:
                 start_equity=settings.paper_start_coins,
             )
 
-            equity_row, holdings = simulate_daily_rebalance(
+            state_json = get_app_state_value(conn, STATE_KEY)
+            position_state = json.loads(state_json) if state_json else {}
+
+            equity_row, holdings, updated_state, portfolio_diag = simulate_daily_rebalance(
                 day=run_day,
                 ts=run_ts,
                 buy_items=buy_items,
+                safe_universe=safe_universe,
                 current_prices=current_prices,
                 previous_holdings=previous_holdings,
                 previous_equity=previous_equity,
                 start_equity=settings.paper_start_coins,
                 historical_peak_equity=historical_peak,
                 previous_max_drawdown_pct=previous_max_drawdown,
+                position_state=position_state,
+                market_regime=market_regime,
+                rebalance_band=0.08,
             )
 
             upsert_equity(conn, row=equity_row)
             replace_holdings(conn, day=run_day, holdings=holdings)
+            upsert_app_state_value(conn, STATE_KEY, json.dumps(updated_state))
 
             conn.commit()
         except Exception:
             conn.rollback()
             raise
 
-    top_picks = (
-        ", ".join(
-            f"{row['item_id']} ({row['weight_pct'] * 100:.1f}%)"
-            for row in buy_items[:5]
-        )
-        or "No BUY picks"
-    )
+    top_picks = ", ".join(f"{row['item_id']} ({row['weight_pct'] * 100:.1f}%)" for row in buy_items[:5]) or "No BUY picks"
     logging.info("Worker completed.")
     logging.info(
-        "Summary | stored_items=%s | skipped_items=%s | signal_items=%s | buy=%s | sell=%s | model=%s | "
-        "history_days=%s | mode=%s | funnel=%s",
+        "Summary | stored_items=%s skipped_items=%s signal_items=%s buy=%s sell=%s model=%s history_days=%s "
+        "mode=%s regime=%s funnel=%s portfolio=%s",
         len(snapshot_rows),
         skipped_items,
         len(signal_rows),
@@ -334,21 +327,23 @@ def main() -> None:
         len(sell_items),
         model_bundle.model_version,
         history_days,
-        basket_cfg.mode if basket_cfg else "UNKNOWN",
+        mode,
+        market_regime,
         funnel_counts,
+        portfolio_diag,
     )
     logging.info("Top picks | %s", top_picks)
     logging.info(
-        "Portfolio | equity=%.2f | cumulative_return_pct=%.3f | daily_return_pct=%.3f | max_drawdown_pct=%.3f",
+        "Portfolio | equity=%.2f cumulative_return_pct=%.3f daily_return_pct=%.3f max_drawdown_pct=%.3f",
         float(equity_row["equity_value"]),
         float(equity_row["cumulative_return_pct"]),
         float(equity_row["daily_return_pct"]),
         float(equity_row["max_drawdown_pct"]),
     )
-    if exclusion_counts:
-        logging.info("Risk exclusions | %s", exclusion_counts)
     if not buy_items:
         logging.warning("No BUY diagnosis | %s", diagnosis)
+    if exclusion_counts:
+        logging.info("Risk exclusions | %s", exclusion_counts)
 
 
 if __name__ == "__main__":

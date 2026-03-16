@@ -303,3 +303,39 @@ def replace_holdings(conn: psycopg.Connection, day: date, holdings: list[dict[st
             """,
             holdings,
         )
+
+
+def _ensure_app_state_table(conn: psycopg.Connection) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            create table if not exists app_state (
+              key text primary key,
+              value text not null
+            )
+            """
+        )
+
+
+def get_app_state_value(conn: psycopg.Connection, key: str) -> str | None:
+    _ensure_app_state_table(conn)
+    with conn.cursor() as cur:
+        cur.execute("select value from app_state where key = %s", (key,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return str(row["value"])
+
+
+def upsert_app_state_value(conn: psycopg.Connection, key: str, value: str) -> None:
+    _ensure_app_state_table(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into app_state (key, value)
+            values (%s, %s)
+            on conflict (key) do update
+            set value = excluded.value
+            """,
+            (key, value),
+        )

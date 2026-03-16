@@ -85,6 +85,8 @@ def build_features(
 
     df["spread_pct"] = (df["buy_price"] - df["sell_price"]) / df["mid_price"].clip(lower=EPS)
     df["spread_pct"] = df["spread_pct"].clip(lower=0.0).fillna(0.0)
+    df["rt_cost"] = ((df["buy_price"] - df["sell_price"]) / df["buy_price"].clip(lower=EPS)).clip(lower=0.0)
+    df["rt_cost"] = df["rt_cost"].fillna(df["spread_pct"])
 
     spread_component = 1.0 - np.minimum(df["spread_pct"] / max(spread_max, EPS), 1.0)
     df["liquidity_score"] = np.log1p(df["volume_daily"].clip(lower=0.0)) * spread_component
