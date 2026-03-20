@@ -150,6 +150,29 @@ def _classify_market_regime(current: pd.DataFrame, spread_max: float) -> tuple[s
     }
 
 
+def _allocator_regime_params(market_regime: str) -> dict[str, float]:
+    if market_regime == "RISK_ON":
+        return {
+            "base_min_expected_return": 0.003,
+            "spread_return_multiplier": 1.00,
+            "conf_min_buy": 0.38,
+            "volume_collapse_min": 0.55,
+        }
+    if market_regime == "RISK_OFF":
+        return {
+            "base_min_expected_return": 0.007,
+            "spread_return_multiplier": 1.35,
+            "conf_min_buy": 0.50,
+            "volume_collapse_min": 0.80,
+        }
+    return {
+        "base_min_expected_return": 0.004,
+        "spread_return_multiplier": 1.10,
+        "conf_min_buy": 0.42,
+        "volume_collapse_min": 0.65,
+    }
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     settings = Settings.from_env()
@@ -167,9 +190,10 @@ def main() -> None:
     history_days = 0
     funnel_counts: dict[str, int] = {}
     diagnosis = ""
+    rejection_diagnostics: list[dict[str, object]] = []
     market_regime = "MIXED"
     regime_stats: dict[str, float] = {}
-    portfolio_diag: dict[str, float | int | str] = {}
+    portfolio_diag: dict[str, object] = {}
 
     with get_connection(settings.supabase_database_url) as conn:
         try:
@@ -217,6 +241,7 @@ def main() -> None:
                 current = features[features["day"] == run_day].copy()
 
             market_regime, regime_stats = _classify_market_regime(current, settings.spread_max)
+            regime_cfg = _allocator_regime_params(market_regime)
             logging.info(
                 "Regime | mode=%s market=%s history_days=%s breadth=%.3f median_spread=%.4f median_vol=%.4f",
                 mode,
@@ -243,6 +268,10 @@ def main() -> None:
                 spread_max=settings.spread_max,
                 liquidity_min=effective_liquidity_min,
                 vol_max=effective_vol_max,
+                base_min_expected_return=regime_cfg["base_min_expected_return"],
+                spread_return_multiplier=regime_cfg["spread_return_multiplier"],
+                conf_min_buy=regime_cfg["conf_min_buy"],
+                volume_collapse_min=regime_cfg["volume_collapse_min"],
                 min_weight_pct=settings.min_weight_pct,
                 max_weight_pct=settings.max_weight_pct,
                 sell_neg_threshold=effective_sell_neg_threshold,
@@ -257,11 +286,20 @@ def main() -> None:
                 funnel_counts,
                 diagnosis,
                 top_candidates,
+                rejection_diagnostics,
                 safe_universe,
             ) = build_basket(decision_frame=decision, blacklist=blacklist, cfg=basket_cfg)
 
+            logging.info(
+                "Basket path | path=%s eligible=%s rescue_selected=%s",
+                diagnosis,
+                funnel_counts.get("eligible_primary", 0),
+                funnel_counts.get("rescue_selected", 0),
+            )
             if top_candidates:
-                logging.info("Top candidates | %s", top_candidates)
+                logging.info("Top safe-universe candidates (score-ranked, top10) | %s", top_candidates)
+            if rejection_diagnostics:
+                logging.info("Top rejection diagnostics (safe-universe top10) | %s", rejection_diagnostics)
 
             signal_items = _select_signal_items(decision, buy_items, sell_items)
             signal_rows = signals[signals["item_id"].isin(signal_items)].to_dict("records") if signal_items else signals.to_dict("records")
@@ -319,7 +357,7 @@ def main() -> None:
     logging.info("Worker completed.")
     logging.info(
         "Summary | stored_items=%s skipped_items=%s signal_items=%s buy=%s sell=%s model=%s history_days=%s "
-        "mode=%s regime=%s funnel=%s portfolio=%s",
+        "mode=%s regime=%s path=%s funnel=%s portfolio=%s",
         len(snapshot_rows),
         skipped_items,
         len(signal_rows),
@@ -329,6 +367,7 @@ def main() -> None:
         history_days,
         mode,
         market_regime,
+        diagnosis,
         funnel_counts,
         portfolio_diag,
     )

@@ -194,13 +194,22 @@ def simulate_daily_rebalance(
             buy_df[col] = pd.to_numeric(buy_df[col], errors="coerce").fillna(0.0)
         buy_df = buy_df.sort_values("score", ascending=False)
 
-    selected: list[str] = list(keep_items)
+    selected: list[str] = sorted(
+        keep_items,
+        key=lambda item: float(metrics.get(item, {}).get("score", -1.0)),
+        reverse=True,
+    )
     max_holdings = 5
+    skipped_due_to_cooldown: list[dict[str, str]] = []
+    replacement_swaps: list[dict[str, str | float]] = []
 
     for _, row in buy_df.iterrows() if not buy_df.empty else []:
         item_id = str(row["item_id"])
         cooldown_until = cooldowns.get(item_id)
         if cooldown_until is not None and day <= cooldown_until:
+            skipped_due_to_cooldown.append(
+                {"item_id": item_id, "cooldown_until": cooldown_until.isoformat()}
+            )
             continue
         if item_id in selected:
             continue
@@ -214,6 +223,8 @@ def simulate_daily_rebalance(
         replace_target = None
         replace_score = None
         for cur_item in selected:
+            if qty_map.get(cur_item, 0.0) <= EPS:
+                continue
             cur_entry_day = entry_days.get(cur_item, day - timedelta(days=999))
             cur_hold_days = max(0, (day - cur_entry_day).days)
             if cur_hold_days < 2:
@@ -232,6 +243,14 @@ def simulate_daily_rebalance(
             selected.remove(replace_target)
             selected.append(item_id)
             exit_reasons[replace_target] = "replacement_upgrade"
+            replacement_swaps.append(
+                {
+                    "out_item_id": replace_target,
+                    "in_item_id": item_id,
+                    "old_score": float(replace_score),
+                    "new_score": new_score,
+                }
+            )
 
     selected = selected[:max_holdings]
     selected_count = len(selected)
@@ -276,6 +295,7 @@ def simulate_daily_rebalance(
 
     # Execute mandatory exits first.
     trades_executed = 0
+    executed_exits: list[dict[str, str]] = []
     for item_id, reason in list(exit_reasons.items()):
         qty = qty_map.get(item_id, 0.0)
         if qty <= 0:
@@ -295,6 +315,7 @@ def simulate_daily_rebalance(
 
         qty_map[item_id] = 0.0
         entry_days.pop(item_id, None)
+        executed_exits.append({"item_id": item_id, "reason": reason})
 
     # Recompute equity after exits at bid marks.
     holdings_value_after_exits = 0.0
@@ -367,6 +388,7 @@ def simulate_daily_rebalance(
     # Build holdings rows and final equity.
     holdings_rows: list[dict[str, float | date | str]] = []
     holdings_value = 0.0
+    final_item_ids: set[str] = set()
     for item_id, qty in qty_map.items():
         if qty <= EPS:
             continue
@@ -375,6 +397,7 @@ def simulate_daily_rebalance(
             continue
         market_value = qty * sell_price
         holdings_value += market_value
+        final_item_ids.add(item_id)
         holdings_rows.append(
             {
                 "day": day,
@@ -414,6 +437,8 @@ def simulate_daily_rebalance(
         "entry_days": {k: v.isoformat() for k, v in entry_days.items()},
         "cooldowns": {k: v.isoformat() for k, v in cooldowns.items()},
     }
+    kept_positions = sorted(item_id for item_id in initial_qty_map if item_id in final_item_ids)
+    newly_added_positions = sorted(item_id for item_id in final_item_ids if item_id not in initial_qty_map)
     diagnostics = {
         "selected_count": selected_count,
         "invest_cap": invest_cap,
@@ -421,5 +446,10 @@ def simulate_daily_rebalance(
         "rebalance_band": rebalance_band,
         "cash_weight": float(cash / max(equity_value, EPS)),
         "market_regime": market_regime,
+        "kept_positions": kept_positions,
+        "exited_positions": executed_exits,
+        "newly_added_positions": newly_added_positions,
+        "skipped_due_to_cooldown": skipped_due_to_cooldown,
+        "replacement_swaps": replacement_swaps,
     }
     return equity_row, holdings_rows, new_state, diagnostics

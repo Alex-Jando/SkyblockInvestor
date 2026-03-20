@@ -120,6 +120,6 @@ def build_features(
     df["max_alloc_pct_feasible"] = df["max_alloc_pct_feasible"].fillna(0.0).clip(lower=0.0)
 
     df["volume_collapse_frac"] = df["volume_daily"] / (df["volume_median_30d"] + EPS)
-    df["volume_collapse_frac"] = df["volume_collapse_frac"].fillna(1.0)
+    df["volume_collapse_frac"] = df["volume_collapse_frac"].fillna(1.0).clip(lower=0.0, upper=5.0)
 
     return df

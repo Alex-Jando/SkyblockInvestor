@@ -144,12 +144,21 @@ def predict_horizon_signals(
         )
         spread = frame["spread_pct"].fillna(0.0).clip(lower=0.0).to_numpy()
         liquidity = frame["liquidity_score"].fillna(0.0).to_numpy()
+        imbalance = frame["imbalance"].fillna(0.0).clip(-1.0, 1.0).to_numpy()
+        volume_zscore = frame["volume_zscore_30d"].fillna(0.0).to_numpy()
 
-        confidence = _sigmoid(expected_return / (vol_30d + model_uncertainty + EPS))
-        confidence *= np.clip(1.0 - spread / max(spread_max, EPS), 0.2, 1.0)
-        confidence *= np.clip(liquidity / max(liquidity_target, EPS), 0.2, 1.0)
-        confidence *= np.clip(1.0 / (1.0 + 4.0 * model_uncertainty), 0.25, 1.0)
+        base_signal = expected_return / (vol_30d + model_uncertainty + EPS)
+        confidence = _sigmoid(base_signal)
+        confidence *= np.clip(1.0 / (1.0 + 3.0 * model_uncertainty), 0.50, 1.00)
         confidence = np.clip(confidence, 0.0, 1.0)
+
+        signal_quality = (
+            0.45 * np.clip(expected_return, -1.0, 1.0)
+            + 0.20 * np.clip(imbalance, -1.0, 1.0)
+            + 0.15 * np.clip(volume_zscore / 3.0, -1.0, 1.0)
+            + 0.10 * np.clip(liquidity / max(liquidity_target, EPS), 0.0, 1.5)
+            - 0.10 * np.clip(spread / max(spread_max, EPS), 0.0, 2.0)
+        )
 
         out_frames.append(
             pd.DataFrame(
@@ -160,9 +169,10 @@ def predict_horizon_signals(
                     "confidence": confidence,
                     "liquidity_score": frame["liquidity_score"].fillna(0.0).to_numpy(),
                     "spread_pct": frame["spread_pct"].fillna(0.0).clip(lower=0.0).to_numpy(),
-                    "imbalance": frame["imbalance"].fillna(0.0).clip(-1.0, 1.0).to_numpy(),
+                    "imbalance": imbalance,
                     "volatility_30d": frame["volatility_30d"].fillna(0.05).to_numpy(),
                     "max_alloc_pct_feasible": frame["max_alloc_pct_feasible"].fillna(0.0).to_numpy(),
+                    "signal_quality": signal_quality,
                     "model_version": model_bundle.model_version,
                 }
             )
