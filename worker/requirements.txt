@@ -1,6 +1,8 @@
 requests>=2.32.0,<3.0.0
+python-dotenv>=1.0.1,<2.0.0
+
+# Legacy worker (v1) deps — keep for now so old code doesn't break
 pandas>=2.2.0,<3.0.0
 numpy>=1.26.0,<3.0.0
 scikit-learn>=1.5.0,<2.0.0
 psycopg[binary]>=3.2.0,<4.0.0
-python-dotenv>=1.0.1,<2.0.0
