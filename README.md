@@ -133,3 +133,14 @@ Schedule: daily at `08:00 UTC` (plus manual `workflow_dispatch`).
 - `GET /api/performance`
 
 The web app only reads precomputed DB rows; no heavy modeling runs in the web server.
+
+## Price Semantics / Profit Realism
+
+Hypixel Bazaar `quick_status` names are easy to misread:
+
+- `buyPrice` is the current buy-order side / bid. This is what you receive when you instant-sell.
+- `sellPrice` is the current sell-offer side / ask. This is what you pay when you instant-buy.
+
+Paper performance must therefore buy at `sellPrice` and mark or exit at `buyPrice` after Bazaar tax.
+Older experiments that effectively bought at `buyPrice` and sold at `sellPrice` were spread-inverted and
+overstated profit. Treat current paper results as conservative execution estimates, not confirmed real-money P&L.

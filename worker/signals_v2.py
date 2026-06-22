@@ -68,9 +68,9 @@ MAX_BUY_FILL_HOURS  = 6.0     # skip illiquid items with >6h estimated fill time
 
 # ── Price math ────────────────────────────────────────────────────────────────
 
-def _buy_order_price(sell_price: float) -> float:
-    """Place just above the current top buyer (= instasell price + 0.1)."""
-    return round(sell_price + 0.1, 1)
+def _buy_order_price(bid_price: float) -> float:
+    """Place a Bazaar buy order just above the current top buyer/bid."""
+    return round(bid_price + 0.1, 1)
 
 
 def _sell_order_price(entry_price: float, net_return: float = TARGET_NET_RETURN) -> float:
@@ -98,7 +98,7 @@ def _size_order(features: dict, equity: float) -> tuple[int, float, str]:
       2. Portfolio cap: MAX_POSITION_PCT of equity
       3. Absolute min/max
     """
-    buy_price = _buy_order_price(features["sell_price"])
+    buy_price = _buy_order_price(features["buy_price"])
     hourly_sell = features.get("hourly_sell_vol", 0)
 
     # 1. Volume-based maximum
@@ -184,7 +184,7 @@ def generate_signals(
         if qty <= 0:
             continue
 
-        buy_price  = _buy_order_price(feat["sell_price"])
+        buy_price  = _buy_order_price(feat["buy_price"])
         target_sell = _sell_order_price(buy_price)
         stop        = _stop_price(buy_price)
 
@@ -311,8 +311,9 @@ def update_fills(
 
         # ── BUY order ────────────────────────────────────────────────────────
         if order["side"] == "BUY":
-            if cur_sell > 0 and order["order_price"] >= cur_sell:
-                # Sellers are willing to sell at/below our bid → order is filling.
+            if cur_buy > 0 and order["order_price"] >= cur_buy:
+                # Our buy order is at/above the current bid, so instant-sellers
+                # can fill us over time. Do not require crossing the ask.
                 # Use order book delta if available; otherwise fall back to
                 # weekly-volume estimate so fills never stall on first run.
                 ob_est = _ob_fill_estimate("SELL", order["order_price"])
@@ -356,17 +357,18 @@ def update_fills(
                             "item_id":          item_id,
                             "side":             "SELL",
                             "order_price":      target_p,
-                            "qty":              order["qty_ordered"],
+                            "qty":              new_total,
                             "parent_order_id":  order["id"],
                             "target_price":     target_p,
                             "stop_price":       stop_p,
+                            "cost_basis_avg":   new_cb,
                         })
                         events.append({
                             "type":           "SELL_ORDER_PLACED",
                             "order_id":       sell_id,
                             "item_id":        item_id,
                             "sell_price":     target_p,
-                            "qty":            order["qty_ordered"],
+                            "qty":            new_total,
                             "cost_basis":     new_cb,
                             "expected_net":   round(target_p * (1 - BZ_TAX) / new_cb - 1, 4),
                         })
@@ -378,7 +380,7 @@ def update_fills(
                 stale = elapsed_h * 60 >= REPRICE_STALE_MIN
                 original_price = order["original_order_price"] or order["order_price"]
                 max_chase      = round(original_price * (1 + BUY_REPRICE_MAX_SLIP), 1)
-                new_buy_price  = round(cur_sell + 0.1, 1) if cur_sell > 0 else None
+                new_buy_price  = round(cur_buy + 0.1, 1) if cur_buy > 0 else None
 
                 if (
                     stale
@@ -413,8 +415,9 @@ def update_fills(
 
         # ── SELL order ───────────────────────────────────────────────────────
         elif order["side"] == "SELL":
-            if cur_buy > 0 and order["order_price"] <= cur_buy:
-                # Buyers are buying at/above our ask → order is filling.
+            if cur_sell > 0 and order["order_price"] <= cur_sell:
+                # Our sell order is at/below the current ask, so instant-buyers
+                # can fill us over time. Do not require dropping to the bid.
                 ob_est = _ob_fill_estimate("BUY", order["order_price"])
                 if ob_est is not None:
                     new_fills = min(qty_remaining, ob_est)
@@ -457,7 +460,7 @@ def update_fills(
                 reprice_count = order["reprice_count"] or 0
                 stale = elapsed_h * 60 >= REPRICE_STALE_MIN
                 cost_basis = order["cost_basis_avg"] or order["order_price"]
-                new_sell_price = round(cur_buy - 0.1, 1) if cur_buy > 0 else None
+                new_sell_price = round(cur_sell - 0.1, 1) if cur_sell > 0 else None
                 still_profitable = (
                     new_sell_price is not None
                     and (new_sell_price * (1 - BZ_TAX)) / (cost_basis + EPS) - 1

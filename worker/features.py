@@ -3,6 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+try:
+    from market_math import spread_pct as bazaar_spread_pct
+except ModuleNotFoundError:  # allows `python -m worker...` smoke tests
+    from .market_math import spread_pct as bazaar_spread_pct
+
 EPS = 1e-9
 
 
@@ -83,9 +88,15 @@ def build_features(
     supply_proxy = df["sell_volume"]
     df["imbalance"] = (demand_proxy - supply_proxy) / (demand_proxy + supply_proxy + EPS)
 
-    df["spread_pct"] = (df["buy_price"] - df["sell_price"]) / df["mid_price"].clip(lower=EPS)
-    df["spread_pct"] = df["spread_pct"].clip(lower=0.0).fillna(0.0)
-    df["rt_cost"] = ((df["buy_price"] - df["sell_price"]) / df["buy_price"].clip(lower=EPS)).clip(lower=0.0)
+    # Hypixel names are counterintuitive: buy_price is the current bid and
+    # sell_price is the current ask. The old formula used bid-ask, which clipped
+    # to zero for normal markets and made the paper portfolio look too good.
+    df["spread_pct"] = [
+        bazaar_spread_pct(bid, ask)
+        for bid, ask in zip(df["buy_price"], df["sell_price"], strict=False)
+    ]
+    df["spread_pct"] = pd.to_numeric(df["spread_pct"], errors="coerce").fillna(0.0)
+    df["rt_cost"] = ((df["sell_price"] - df["buy_price"]) / df["sell_price"].clip(lower=EPS)).clip(lower=0.0)
     df["rt_cost"] = df["rt_cost"].fillna(df["spread_pct"])
 
     spread_component = 1.0 - np.minimum(df["spread_pct"] / max(spread_max, EPS), 1.0)

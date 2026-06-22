@@ -6,6 +6,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+try:
+    from market_math import BAZAAR_TAX, ask_price, entry_cost, liquidation_value
+except ModuleNotFoundError:
+    from .market_math import BAZAAR_TAX, ask_price, entry_cost, liquidation_value
+
 EPS = 1e-9
 
 
@@ -117,9 +122,9 @@ def simulate_daily_rebalance(
 
     marked_holdings_value = 0.0
     for item_id, qty in qty_map.items():
-        sell_price = float(current_prices.get(item_id, {}).get("sell_price", 0.0))
-        if sell_price > 0:
-            marked_holdings_value += qty * sell_price
+        bid = float(current_prices.get(item_id, {}).get("buy_price", 0.0))
+        if bid > 0:
+            marked_holdings_value += liquidation_value(qty, bid)
     equity_before = cash + marked_holdings_value
     if equity_before <= EPS:
         equity_before = prev_equity_value
@@ -300,15 +305,15 @@ def simulate_daily_rebalance(
         qty = qty_map.get(item_id, 0.0)
         if qty <= 0:
             continue
-        sell_price = float(current_prices.get(item_id, {}).get("sell_price", 0.0))
-        if sell_price <= 0:
+        bid = float(current_prices.get(item_id, {}).get("buy_price", 0.0))
+        if bid <= 0:
             continue
-        proceeds = qty * sell_price
+        proceeds = liquidation_value(qty, bid)
         cash += proceeds
         trades_executed += 1
 
-        cost_basis = float(cost_map.get(item_id, sell_price))
-        loss_exit = sell_price < cost_basis
+        cost_basis = float(cost_map.get(item_id, bid))
+        loss_exit = (bid * (1.0 - BAZAAR_TAX)) < cost_basis
         if loss_exit:
             cooldown_days = 5 if reason == "volume_collapse" else 3
             cooldowns[item_id] = day + timedelta(days=cooldown_days)
@@ -322,9 +327,9 @@ def simulate_daily_rebalance(
     for item_id, qty in qty_map.items():
         if qty <= 0:
             continue
-        sell_price = float(current_prices.get(item_id, {}).get("sell_price", 0.0))
-        if sell_price > 0:
-            holdings_value_after_exits += qty * sell_price
+        bid = float(current_prices.get(item_id, {}).get("buy_price", 0.0))
+        if bid > 0:
+            holdings_value_after_exits += liquidation_value(qty, bid)
     equity_for_targeting = cash + holdings_value_after_exits
     if equity_for_targeting <= EPS:
         equity_for_targeting = equity_before
@@ -334,13 +339,13 @@ def simulate_daily_rebalance(
         price_info = current_prices.get(item_id)
         if not price_info:
             continue
-        buy_price = float(price_info.get("buy_price", 0.0))
-        sell_price = float(price_info.get("sell_price", 0.0))
-        if buy_price <= 0 or sell_price <= 0:
+        bid = float(price_info.get("buy_price", 0.0))
+        ask = ask_price(price_info.get("sell_price", 0.0))
+        if bid <= 0 or ask <= 0:
             continue
 
         qty = float(qty_map.get(item_id, 0.0))
-        current_value = qty * sell_price
+        current_value = liquidation_value(qty, bid)
         target_value = equity_for_targeting * float(target_weights.get(item_id, 0.0))
         current_weight = current_value / max(equity_for_targeting, EPS)
         target_weight = target_value / max(equity_for_targeting, EPS)
@@ -354,11 +359,11 @@ def simulate_daily_rebalance(
             buy_value = min(desired_buy_value, cash)
             if buy_value <= EPS:
                 continue
-            buy_qty = buy_value / buy_price
+            buy_qty = buy_value / ask
             old_qty = qty
-            old_cost = float(cost_map.get(item_id, buy_price))
+            old_cost = float(cost_map.get(item_id, ask))
             new_qty = old_qty + buy_qty
-            new_cost = ((old_qty * old_cost) + (buy_qty * buy_price)) / max(new_qty, EPS)
+            new_cost = ((old_qty * old_cost) + (buy_qty * ask)) / max(new_qty, EPS)
             qty_map[item_id] = new_qty
             cost_map[item_id] = new_cost
             cash -= buy_value
@@ -368,11 +373,11 @@ def simulate_daily_rebalance(
             sell_value = min(desired_sell_value, current_value)
             if sell_value <= EPS:
                 continue
-            sell_qty = min(qty, sell_value / sell_price)
+            sell_qty = min(qty, sell_value / max(bid * (1.0 - BAZAAR_TAX), EPS))
             if sell_qty <= EPS:
                 continue
             qty_map[item_id] = max(0.0, qty - sell_qty)
-            cash += sell_qty * sell_price
+            cash += liquidation_value(sell_qty, bid)
             trades_executed += 1
             if qty_map[item_id] <= EPS:
                 qty_map[item_id] = 0.0
@@ -392,10 +397,10 @@ def simulate_daily_rebalance(
     for item_id, qty in qty_map.items():
         if qty <= EPS:
             continue
-        sell_price = float(current_prices.get(item_id, {}).get("sell_price", 0.0))
-        if sell_price <= 0:
+        bid = float(current_prices.get(item_id, {}).get("buy_price", 0.0))
+        if bid <= 0:
             continue
-        market_value = qty * sell_price
+        market_value = liquidation_value(qty, bid)
         holdings_value += market_value
         final_item_ids.add(item_id)
         holdings_rows.append(
@@ -403,7 +408,7 @@ def simulate_daily_rebalance(
                 "day": day,
                 "item_id": item_id,
                 "qty": qty,
-                "cost_basis": float(cost_map.get(item_id, sell_price)),
+                "cost_basis": float(cost_map.get(item_id, bid)),
                 "market_value": market_value,
             }
         )

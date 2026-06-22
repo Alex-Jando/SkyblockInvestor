@@ -7,7 +7,11 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor
 
-EPS = 1e-9
+try:
+    from market_math import BAZAAR_TAX, EPS, net_exit_return
+except ModuleNotFoundError:
+    from .market_math import BAZAAR_TAX, EPS, net_exit_return
+
 HORIZONS = [3, 7, 14]
 
 FEATURE_COLUMNS = [
@@ -41,8 +45,15 @@ def _build_training_set(features: pd.DataFrame, horizon_days: int, as_of_day: da
     df = df.sort_values(["item_id", "day"]).reset_index(drop=True)
     grouped = df.groupby("item_id", group_keys=False)
 
-    df["future_sell_price"] = grouped["sell_price"].shift(-horizon_days)
-    df["target"] = (df["future_sell_price"] / df["buy_price"].clip(lower=EPS)) - 1.0
+    # Realistic long-only target: enter by paying today's ask (sell_price) and
+    # exit by selling into the future bid (buy_price), after Bazaar tax. The old
+    # target used future ask / current bid, which measured the spread backwards
+    # and materially overstated expected profit.
+    df["future_bid_price"] = grouped["buy_price"].shift(-horizon_days)
+    df["target"] = [
+        net_exit_return(entry_ask, exit_bid, tax=BAZAAR_TAX)
+        for entry_ask, exit_bid in zip(df["sell_price"], df["future_bid_price"], strict=False)
+    ]
 
     train = df[(df["day"] < as_of_day) & df["target"].notna()].copy()
     return train.dropna(subset=["buy_price", "sell_price"])

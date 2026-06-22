@@ -103,7 +103,7 @@ export default function PerformancePage() {
                   tickFormatter={(value) => `${Number(value).toFixed(1)}%`}
                 />
                 <Tooltip
-                  formatter={(value: number) => pct(Number(value))}
+                  formatter={(value) => pct(Number(value ?? 0))}
                   labelFormatter={(label) => `Day: ${label}`}
                 />
                 <Line

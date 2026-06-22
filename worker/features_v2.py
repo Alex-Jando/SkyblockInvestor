@@ -10,6 +10,11 @@ import math
 import sqlite3
 from typing import Any
 
+try:
+    from market_math import spread_pct as bazaar_spread_pct
+except ModuleNotFoundError:
+    from .market_math import spread_pct as bazaar_spread_pct
+
 EPS = 1e-9
 
 # Lookback windows in multiples of 5-min intervals (day-history)
@@ -57,7 +62,7 @@ def compute_features(
         return None
 
     mid_price = (buy_price + sell_price) / 2.0
-    spread_pct = (buy_price - sell_price) / mid_price
+    spread_pct = bazaar_spread_pct(buy_price, sell_price)
 
     # Weekly traded volumes (most recent point)
     sell_wk = latest["sell_wk"] or 0

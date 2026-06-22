@@ -242,10 +242,11 @@ def create_order(conn: sqlite3.Connection, order: dict) -> int:
            (created_at, updated_at, item_id, side, order_price, qty_ordered,
             qty_filled, cost_basis_avg, status, parent_order_id,
             target_price, stop_price, original_order_price, reprice_count)
-           VALUES (?,?,?,?,?,?, 0,NULL,'OPEN',?,?,?,?,0)""",
+           VALUES (?,?,?,?,?,?, 0,?,'OPEN',?,?,?,?,0)""",
         (
             now, now,
             order["item_id"], order["side"], order["order_price"], order["qty"],
+            order.get("cost_basis_avg"),
             order.get("parent_order_id"),
             order.get("target_price"), order.get("stop_price"),
             order["order_price"],  # original_order_price = initial price

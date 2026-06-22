@@ -114,8 +114,8 @@ export default function HomePage() {
                   <th>Liquidity</th>
                   <th>Spread</th>
                   <th>Feasible Cap</th>
-                  <th>Buy Price</th>
-                  <th>Sell Price</th>
+                  <th>Bid / Insta-sell</th>
+                  <th>Ask / Insta-buy</th>
                   <th>Allocation</th>
                   <th>Qty</th>
                 </tr>
@@ -123,9 +123,9 @@ export default function HomePage() {
               <tbody>
                 {rows.map((item) => {
                   const weight = Number(item.weight_pct);
-                  const buyPrice = Number(item.current_buy_price ?? 0);
+                  const askPrice = Number(item.current_sell_price ?? 0);
                   const allocation = coins * weight;
-                  const qty = buyPrice > 0 ? allocation / buyPrice : 0;
+                  const qty = askPrice > 0 ? allocation / askPrice : 0;
                   return (
                     <tr key={item.item_id}>
                       <td>{item.item_id}</td>

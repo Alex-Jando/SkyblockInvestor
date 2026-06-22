@@ -54,6 +54,10 @@ from signals_v2 import (
     generate_signals, _buy_order_price, _sell_order_price, _stop_price,
     _size_order,
 )
+try:
+    from market_math import spread_pct as bazaar_spread_pct
+except ModuleNotFoundError:
+    from .market_math import spread_pct as bazaar_spread_pct
 
 EPS = 1e-9
 CANDLE_H = 2.0  # 2h candles
@@ -193,7 +197,7 @@ def _compute_features_from_rows(
     else:
         momentum_accel = 0.0
 
-    spread_pct = ((cur.get("sell_price") or 0) - (cur.get("buy_price") or 0)) / ((cur.get("buy_price") or EPS) + EPS)
+    spread_pct = bazaar_spread_pct(cur.get("buy_price"), cur.get("sell_price"))
 
     if not cur.get("sell_price") or not cur.get("buy_price"):
         return None
@@ -297,11 +301,13 @@ def simulate_order_on_candles(
 
         # ── BUY order ────────────────────────────────────────────────────────
         if order.side == "BUY":
-            if order.order_price >= cur_sell > 0:
+            if order.order_price >= cur_buy > 0:
                 fill_rate_h = hourly_sell * FILL_SHARE_FRAC
                 new_fills   = min(order.qty_remaining, fill_rate_h * elapsed_h)
                 if new_fills > 0.5:
+                    prev_filled = order.qty_filled
                     order.qty_filled  += new_fills
+                    order.cost_basis = ((prev_filled * order.cost_basis) + (new_fills * order.order_price)) / max(order.qty_filled, EPS)
                     order.last_fill_ts = step_ts
                     if order.qty_filled >= order.qty * 0.99:
                         order.status    = "FILLED"
@@ -313,7 +319,7 @@ def simulate_order_on_candles(
                 # Check reprice
                 reprice_stale = (step_ts - last_reprice_ts).total_seconds() / 60 >= REPRICE_STALE_MIN
                 max_chase     = order.original_price * (1 + BUY_REPRICE_MAX_SLIP)
-                new_price     = round(cur_sell + 0.1, 1) if cur_sell > 0 else None
+                new_price     = round(cur_buy + 0.1, 1) if cur_buy > 0 else None
                 if (
                     reprice_stale
                     and new_price and new_price != order.order_price
@@ -331,15 +337,15 @@ def simulate_order_on_candles(
         # ── SELL order ───────────────────────────────────────────────────────
         elif order.side == "SELL":
             # Stop-loss first
-            if cur_sell > 0 and cur_sell < order.stop_price:
+            if cur_buy > 0 and cur_buy < order.stop_price:
                 order.qty_filled  += order.qty_remaining
                 order.status       = "CANCELLED"
                 order.closed_ts    = step_ts
                 order.exit_reason  = "stop_loss"
-                order.order_price  = cur_sell  # instasell price
+                order.order_price  = cur_buy  # instant-sell/bid price
                 break
 
-            if order.order_price <= cur_buy > 0:
+            if order.order_price <= cur_sell > 0:
                 fill_rate_h = hourly_buy * FILL_SHARE_FRAC
                 new_fills   = min(order.qty_remaining, fill_rate_h * elapsed_h)
                 if new_fills > 0.5:
@@ -354,7 +360,7 @@ def simulate_order_on_candles(
             else:
                 # Reprice down
                 reprice_stale = (step_ts - last_reprice_ts).total_seconds() / 60 >= REPRICE_STALE_MIN
-                new_price     = round(cur_buy - 0.1, 1) if cur_buy > 0 else None
+                new_price     = round(cur_sell - 0.1, 1) if cur_sell > 0 else None
                 still_ok      = (
                     new_price is not None
                     and (new_price * (1 - BZ_TAX)) / (order.cost_basis + EPS) - 1
@@ -369,7 +375,7 @@ def simulate_order_on_candles(
                     order.reprice_count += 1
                     last_reprice_ts      = step_ts
                 elif age_h > SELL_TIME_STOP:
-                    exit_p = cur_sell if cur_sell > 0 else order.order_price * 0.97
+                    exit_p = cur_buy if cur_buy > 0 else order.order_price * 0.97
                     order.order_price  = exit_p
                     order.qty_filled  += order.qty_remaining
                     order.status       = "EXPIRED"
@@ -550,15 +556,19 @@ def run_backtest(start_equity: float = 100_000_000.0, max_positions: int = 5) ->
                 }
 
         # ── Mark-to-market equity ─────────────────────────────────────────────
-        holdings = sum(
-            o.qty_remaining * (current_prices.get(o.item_id, {}).get("sell_price") or o.order_price)
-            for o in open_orders
-            if o.status not in ("FILLED", "CANCELLED", "EXPIRED")
-        ) + sum(
-            o.qty_remaining * o.order_price
-            for o in open_orders
-            if o.side == "BUY" and o.status in ("OPEN", "PARTIAL")
-        )
+        holdings = 0.0
+        for o in open_orders:
+            if o.status in ("FILLED", "CANCELLED", "EXPIRED"):
+                continue
+            prices = current_prices.get(o.item_id, {})
+            if o.side == "BUY":
+                # Unfilled buy-order cash is reserved, not profit. Count the
+                # reservation once; mark only the filled portion at the bid.
+                holdings += o.qty_remaining * o.order_price
+                if o.qty_filled > 0:
+                    holdings += o.qty_filled * (prices.get("buy_price") or o.cost_basis) * (1 - BZ_TAX)
+            else:
+                holdings += o.qty_remaining * (prices.get("buy_price") or o.cost_basis) * (1 - BZ_TAX)
         equity = free_cash + holdings
         equity_curve.append((step_ts, equity))
 
@@ -618,7 +628,7 @@ def run_backtest(start_equity: float = 100_000_000.0, max_positions: int = 5) ->
         if order.side == "SELL" and order.status in ("OPEN", "PARTIAL"):
             # Force close at last available price
             last_price = (
-                list(candles_by_item.get(order.item_id, [{}]))[-1].get("sell_price")
+                list(candles_by_item.get(order.item_id, [{}]))[-1].get("buy_price")
                 or order.order_price
             )
             proceeds    = order.qty_remaining * last_price * (1 - BZ_TAX)
@@ -644,6 +654,12 @@ def run_backtest(start_equity: float = 100_000_000.0, max_positions: int = 5) ->
         elif order.side == "BUY" and order.status in ("OPEN", "PARTIAL"):
             # Refund unfilled buy
             free_cash += order.qty_remaining * order.order_price
+            if order.qty_filled > 0:
+                last_bid = (
+                    list(candles_by_item.get(order.item_id, [{}]))[-1].get("buy_price")
+                    or order.cost_basis
+                )
+                free_cash += order.qty_filled * last_bid * (1 - BZ_TAX)
 
     # ── Report ────────────────────────────────────────────────────────────────
     final_equity = free_cash

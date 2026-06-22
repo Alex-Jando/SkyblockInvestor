@@ -87,8 +87,8 @@ export default function SellPage() {
                   <th>Confidence</th>
                   <th>Liquidity</th>
                   <th>Spread</th>
-                  <th>Buy Price</th>
-                  <th>Sell Price</th>
+                  <th>Bid / Insta-sell</th>
+                  <th>Ask / Insta-buy</th>
                 </tr>
               </thead>
               <tbody>

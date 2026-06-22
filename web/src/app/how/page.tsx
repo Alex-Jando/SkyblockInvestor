@@ -26,7 +26,11 @@ export default function HowPage() {
         <h2 style={{ marginTop: 0 }}>Core Assumptions</h2>
         <ul style={{ margin: 0, paddingLeft: 18 }}>
           <li>Only Bazaar items are considered.</li>
-          <li>Buying uses insta-buy (`buy_price`), selling uses insta-sell (`sell_price`).</li>
+          <li>
+            Hypixel&apos;s <code>buyPrice</code> is the bid/instant-sell price, and <code>sellPrice</code> is
+            the ask/instant-buy price. Paper performance now buys at ask and marks/exits at bid after
+            Bazaar tax.
+          </li>
           <li>Portfolio starts at 100,000,000 coins and is evaluated as percent return over time.</li>
           <li>Each position has both a model cap and a liquidity/turnover feasibility cap.</li>
           <li>Any basket weight under 5% is dropped before final normalization.</li>
@@ -38,7 +42,7 @@ export default function HowPage() {
         <ul style={{ margin: 0, paddingLeft: 18 }}>
           <li>No authentication or user-specific portfolios.</li>
           <li>No intraday execution logic (daily snapshots only).</li>
-          <li>No claim of live tradeability guarantees, only feasibility proxies.</li>
+          <li>No claim of live tradeability guarantees, only conservative paper execution proxies.</li>
         </ul>
       </section>
     </>
